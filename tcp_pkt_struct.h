@@ -15,6 +15,21 @@ typedef uint16_t port_t;
 /*  #define HOST_IP "10.0.8.4"
 #define CLIENT_IP "10.10.70.135"
 #define SERVER_IP "10.10.70.136"*/
+
+#define METADATA_SIZE 16
+
+#pragma pack(push, 1)
+typedef struct {
+    uint16_t padding;
+    uint8_t opt;
+    uint8_t len;
+    uint32_t payload;
+    uint32_t payload_2;
+    uint32_t payload_3;
+
+} pkt_meta;
+#pragma pack(pop)
+
 #pragma pack(push, 1)
 typedef struct {
     struct iphdr ipv4_header;
