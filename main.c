@@ -1,218 +1,292 @@
-/** 
- * Code for malware listening on victim machine
- * */
-
+#include <arpa/inet.h>
 #include <errno.h>
+#include <libnetfilter_queue/libnetfilter_queue.h>
+#include <linux/types.h>
+#include <linux/netfilter.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include <time.h>
-#include <arpa/inet.h>
+#include "tcp_pkt_struct.h"
+// TEST COMMENT
 
-#include <libmnl/libmnl.h>
-#include <linux/netfilter.h>
-#include <linux/netfilter/nfnetlink.h>
 
-#include <linux/types.h>
-#include <linux/netfilter/nfnetlink_queue.h>
+/**
+ * USE FOR DEBUGGING TO PRINT BINARY NUMBERS
+ */
+static void print_bin(uint8_t n) {
+    for (int i = 0; i < 8; i++) {
+        printf("%d", n % 2);
+        n /= 2;
+    }
 
-#include <libnetfilter_queue/libnetfilter_queue.h>
-
-/* only for NFQA_CT, not needed otherwise: */
-#include <linux/netfilter/nfnetlink_conntrack.h>
-
-static struct mnl_socket *nl;
-
-static struct nlmsghdr *
-nfq_hdr_put(char *buf, int type, uint32_t queue_num)
+}
+uint16_t ipv4_checksum(struct iphdr *ipv4Header)
 {
-	struct nlmsghdr *nlh = mnl_nlmsg_put_header(buf);
-	nlh->nlmsg_type	= (NFNL_SUBSYS_QUEUE << 8) | type;
-	nlh->nlmsg_flags = NLM_F_REQUEST;
+    const uint16_t *data = (const uint16_t *)ipv4Header;
+    size_t len = sizeof(*ipv4Header);
+    uint32_t checksum = 0;
 
-	struct nfgenmsg *nfg = mnl_nlmsg_put_extra_header(nlh, sizeof(*nfg));
-	nfg->nfgen_family = AF_UNSPEC;
-	nfg->version = NFNETLINK_V0;
-	nfg->res_id = htons(queue_num);
+    while (len > 1)
+    {
+        checksum += *data++;
+        len -= 2;
+    }
 
-	return nlh;
+    if (len > 0)
+        checksum += *(const uint8_t *)data;
+
+    while (checksum >> 16)
+        checksum = (checksum & 0xffff) + (checksum >> 16);
+
+    return ~checksum;
 }
 
-static void
-nfq_send_verdict(int queue_num, uint32_t id)
-{
-	char buf[MNL_SOCKET_BUFFER_SIZE];
-	struct nlmsghdr *nlh;
-	struct nlattr *nest;
-
-	nlh = nfq_hdr_put(buf, NFQNL_MSG_VERDICT, queue_num);
-	nfq_nlmsg_verdict_put(nlh, id, NF_ACCEPT);
-
-	/* example to set the connmark. First, start NFQA_CT section: */
-	nest = mnl_attr_nest_start(nlh, NFQA_CT);
-
-	/* then, add the connmark attribute: */
-	mnl_attr_put_u32(nlh, CTA_MARK, htonl(42));
-	/* more conntrack attributes, e.g. CTA_LABEL, could be set here */
-
-	/* end conntrack section */
-	mnl_attr_nest_end(nlh, nest);
-
-	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
-		perror("mnl_socket_send");
-		exit(EXIT_FAILURE);
-	}
+static void send_socket(full_tcp_pkt_t *ipv4_packet) {
+    int raw_socket = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+    // sendto(raw_socket, ipv4_packet, ipv4_packet->ipv4_header.total_length, MSG_DONTROUTE, )
 }
 
-static int queue_cb(const struct nlmsghdr *nlh, void *data)
-{
-	struct nfqnl_msg_packet_hdr *ph = NULL;
-	struct nlattr *attr[NFQA_MAX+1] = {};
-	uint32_t id = 0, skbinfo;
-	struct nfgenmsg *nfg;
-	uint16_t plen;
 
-	if (nfq_nlmsg_parse(nlh, attr) < 0) {
-		perror("problems parsing");
-		return MNL_CB_ERROR;
-	}
+long ipcsum(unsigned char *buf, int length) {
+    int i = 0;
 
-	nfg = mnl_nlmsg_get_payload(nlh);
+    long sum = 0;
+    long data;
 
-	if (attr[NFQA_PACKET_HDR] == NULL) {
-		fputs("metaheader not set\n", stderr);
-		return MNL_CB_ERROR;
-	}
+    // Handle all pairs
+    while (length > 1) {
+        // Corrected to include @Andy's edits and various comments on Stack Overflow
+        data = (((buf[i] << 8) & 0xFF00) | ((buf[i + 1]) & 0xFF));
+        sum += data;
+        // 1's complement carry bit correction in 16-bits (detecting sign extension)
+        if ((sum & 0xFFFF0000) > 0) {
+            sum = sum & 0xFFFF;
+            sum += 1;
+        }
 
-	ph = mnl_attr_get_payload(attr[NFQA_PACKET_HDR]);
+        i += 2;
+        length -= 2;
+    }
 
-	plen = mnl_attr_get_payload_len(attr[NFQA_PAYLOAD]);
-	/* void *payload = mnl_attr_get_payload(attr[NFQA_PAYLOAD]); */
+    // Handle remaining byte in odd length buffers
+    if (length > 0) {
+        // Corrected to include @Andy's edits and various comments on Stack Overflow
+        sum += (buf[i] << 8 & 0xFF00);
+        // 1's complement carry bit correction in 16-bits (detecting sign extension)
+        if ((sum & 0xFFFF0000) > 0) {
+            sum = sum & 0xFFFF;
+            sum += 1;
+        }
+    }
 
-	skbinfo = attr[NFQA_SKB_INFO] ? ntohl(mnl_attr_get_u32(attr[NFQA_SKB_INFO])) : 0;
+    // Final 1's complement value correction to 16-bits
+    sum = ~sum;
+    sum = sum & 0xFFFF;
+    return sum;
 
-	if (attr[NFQA_CAP_LEN]) {
-		uint32_t orig_len = ntohl(mnl_attr_get_u32(attr[NFQA_CAP_LEN]));
-		if (orig_len != plen)
-			printf("truncated ");
-	}
-
-	if (skbinfo & NFQA_SKB_GSO)
-		printf("GSO ");
-
-	id = ntohl(ph->packet_id);
-	printf("packet received (id=%u hw=0x%04x hook=%u, payload len %u",
-		id, ntohs(ph->hw_protocol), ph->hook, plen);
-
-	/*
-	 * ip/tcp checksums are not yet valid, e.g. due to GRO/GSO.
-	 * The application should behave as if the checksums are correct.
-	 *
-	 * If these packets are later forwarded/sent out, the checksums will
-	 * be corrected by kernel/hardware.
-	 */
-	if (skbinfo & NFQA_SKB_CSUMNOTREADY)
-		printf(", checksum not ready");
-	puts(")");
-
-	nfq_send_verdict(ntohs(nfg->res_id), id);
-
-	return MNL_CB_OK;
 }
 
-int main(int argc, char *argv[])
+void rev( void *start, int size )
 {
-	char *buf;
-	/* largest possible packet payload, plus netlink data overhead: */
-	size_t sizeof_buf = 0xffff + (MNL_SOCKET_BUFFER_SIZE/2);
-	struct nlmsghdr *nlh;
-	int ret;
-	unsigned int portid, queue_num;
+    unsigned char *lo = start;
+    unsigned char *hi = start + size - 1;
+    unsigned char swap;
+    while (lo < hi) {
+        swap = *lo;
+        *lo++ = *hi;
+        *hi-- = swap;
+    }
+}
+void tcpcsum(struct iphdr *pIph, unsigned short *ipPayload) {
 
-	if (argc != 2) {
-		printf("Usage: %s [queue_num]\n", argv[0]);
-		exit(EXIT_FAILURE);
-	}
-	queue_num = atoi(argv[1]);
+    register unsigned long sum = 0;
 
-	nl = mnl_socket_open(NETLINK_NETFILTER);
-	if (nl == NULL) {
-		perror("mnl_socket_open");
-		exit(EXIT_FAILURE);
-	}
+    unsigned short tcpLen = ntohs(pIph->tot_len) - (pIph->ihl<<2);
 
-	if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
-		perror("mnl_socket_bind");
-		exit(EXIT_FAILURE);
-	}
-	portid = mnl_socket_get_portid(nl);
+    struct tcphdr *tcphdrp = (struct tcphdr*)(ipPayload);
 
-	buf = malloc(sizeof_buf);
-	if (!buf) {
-		perror("allocate receive buffer");
-		exit(EXIT_FAILURE);
-	}
+    //add the pseudo header 
 
-	/* PF_(UN)BIND is not needed with kernels 3.8 and later */
-	nlh = nfq_hdr_put(buf, NFQNL_MSG_CONFIG, 0);
-	nfq_nlmsg_cfg_put_cmd(nlh, AF_INET, NFQNL_CFG_CMD_PF_UNBIND);
+    //the source ip
 
-	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
-		perror("mnl_socket_send");
-		exit(EXIT_FAILURE);
-	}
+    sum += (pIph->saddr>>16)&0xFFFF;
 
-	nlh = nfq_hdr_put(buf, NFQNL_MSG_CONFIG, 0);
-	nfq_nlmsg_cfg_put_cmd(nlh, AF_INET, NFQNL_CFG_CMD_PF_BIND);
+    sum += (pIph->saddr)&0xFFFF;
 
-	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
-		perror("mnl_socket_send");
-		exit(EXIT_FAILURE);
-	}
+    //the dest ip
 
-	nlh = nfq_hdr_put(buf, NFQNL_MSG_CONFIG, queue_num);
-	nfq_nlmsg_cfg_put_cmd(nlh, AF_INET, NFQNL_CFG_CMD_BIND);
+    sum += (pIph->daddr>>16)&0xFFFF;
 
-	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
-		perror("mnl_socket_send");
-		exit(EXIT_FAILURE);
-	}
+    sum += (pIph->daddr)&0xFFFF;
 
-	nlh = nfq_hdr_put(buf, NFQNL_MSG_CONFIG, queue_num);
-	nfq_nlmsg_cfg_put_params(nlh, NFQNL_COPY_PACKET, 0xffff);
+    //protocol and reserved: 6
 
-	mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS, htonl(NFQA_CFG_F_GSO));
-	mnl_attr_put_u32(nlh, NFQA_CFG_MASK, htonl(NFQA_CFG_F_GSO));
+    sum += htons(IPPROTO_TCP);
 
-	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
-		perror("mnl_socket_send");
-		exit(EXIT_FAILURE);
-	}
+    //the length
 
-	/* ENOBUFS is signalled to userspace when packets were lost
-	 * on kernel side.  In most cases, userspace isn't interested
-	 * in this information, so turn it off.
-	 */
-	ret = 1;
-	mnl_socket_setsockopt(nl, NETLINK_NO_ENOBUFS, &ret, sizeof(int));
+    sum += htons(tcpLen);
 
-	for (;;) {
-		ret = mnl_socket_recvfrom(nl, buf, sizeof_buf);
-		if (ret == -1) {
-			perror("mnl_socket_recvfrom");
-			exit(EXIT_FAILURE);
-		}
 
-		ret = mnl_cb_run(buf, ret, 0, portid, queue_cb, NULL);
-		if (ret < 0){
-			perror("mnl_cb_run");
-			exit(EXIT_FAILURE);
-		}
-	}
 
-	mnl_socket_close(nl);
+    //add the IP payload
 
-	return 0;
+    //initialize checksum to 0
+
+    tcphdrp->check = 0;
+
+    while (tcpLen > 1) {
+
+        sum += * ipPayload++;
+
+        tcpLen -= 2;
+
+    }
+
+    //if any bytes left, pad the bytes and add
+
+    if(tcpLen > 0) {
+
+        //printf("+++++++++++padding, %dn", tcpLen);
+
+        sum += ((*ipPayload)&htons(0xFF00));
+
+    }
+
+    //Fold 32-bit sum to 16 bits: add carrier to result
+
+    while (sum>>16) {
+
+        sum = (sum & 0xffff) + (sum >> 16);
+
+    }
+
+    sum = ~sum;
+
+    //set computation result
+
+    tcphdrp->check = (unsigned short)sum;
+
 }
 
+/* *
+ * Modifies handshake packets in attack mode.
+ * TODO: Replace hardcoded IP addresses with live encryption and dynamically chosen helping servers
+ * TODO: Handle ACK handshake packets
+ * */
+static void modify_handshk_pkt(full_tcp_pkt_t *pkt, int pkt_len) {
+
+    /* Should match only SYN packets */
+    printf("\nPacket intercepted: \n");
+    if (pkt->tcp_header.syn == 1 && pkt->tcp_header.ack == 0) {
+        printf("\tPacket type: SYN\n");
+        pkt_meta *metadata =
+            (pkt_meta *)((unsigned char *)pkt + pkt_len - METADATA_SIZE);
+        char secret_ip[INET_ADDRSTRLEN];
+
+        inet_ntop(AF_INET, &metadata->ip_addr, secret_ip, INET_ADDRSTRLEN);
+        printf("\nSECRET IP: %s\n", secret_ip);
+    }
+
+
+}
+
+static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *data) {
+    u_int32_t id;
+
+    struct nfqnl_msg_packet_hdr *ph;
+    ph = nfq_get_msg_packet_hdr(nfa);
+    id = ntohl(ph->packet_id);
+    printf("entering callback\n");
+
+    full_tcp_pkt_t *ipv4_payload = NULL;
+    int pkt_len = nfq_get_payload(nfa, (unsigned char **) &ipv4_payload);
+    modify_handshk_pkt(ipv4_payload, pkt_len);
+
+    /*rev(&ipv4_payload->ipv4_header.tot_len, 2);
+    ipv4_payload->ipv4_header.tot_len += METADATA_SIZE;
+    rev(&ipv4_payload->ipv4_header.tot_len, 2);
+
+	ipv4_payload->ipv4_header.check = 0;
+    ipv4_payload->ipv4_header.check =
+        ipcsum((unsigned char *)&ipv4_payload->ipv4_header,
+                20);
+    rev(&ipv4_payload->ipv4_header.check, 2); // Convert between endians
+
+    tcpcsum(&ipv4_payload->ipv4_header,
+          (unsigned short *)&ipv4_payload->tcp_header);*/
+    int ret = nfq_set_verdict(qh, id, NF_ACCEPT, (u_int32_t) pkt_len,
+            (void *) ipv4_payload);
+    printf("\n Set verdict status: %s\n", strerror(errno));
+    return ret;
+}
+
+uint16_t running_csum(addr_t old_src, addr_t new_src, uint16_t old_checksum) {
+    return ~(~old_checksum + ~old_src + (new_src));
+}
+
+int main(int argc, char **argv) {
+    struct nfq_handle *h;
+    struct nfq_q_handle *qh;
+    int fd;
+    int rv;
+    char buf[4096] __attribute__ ((aligned));
+
+    printf("opening library handle\n");
+    h = nfq_open();
+    if (!h) {
+        fprintf(stderr, "error during nfq_open()\n");
+        exit(1);
+    }
+
+    printf("unbinding existing nf_queue handler for AF_INET (if any)\n");
+    if (nfq_unbind_pf(h, AF_INET) < 0) {
+        fprintf(stderr, "error during nfq_unbind_pf()\n");
+        exit(1);
+    }
+
+    printf("binding nfnetlink_queue as nf_queue handler for AF_INET\n");
+    if (nfq_bind_pf(h, AF_INET) < 0) {
+        fprintf(stderr, "error during nfq_bind_pf()\n");
+        exit(1);
+    }
+
+    printf("binding this socket to queue '0'\n");
+    qh = nfq_create_queue(h, 0, &cb, NULL);
+    if (!qh) {
+        fprintf(stderr, "error during nfq_create_queue()\n");
+        exit(1);
+    }
+
+    printf("setting copy_packet mode\n");
+    if (nfq_set_mode(qh, NFQNL_COPY_PACKET, 0xffff) < 0) {
+        fprintf(stderr, "can't set packet_copy mode\n");
+        exit(1);
+    }
+
+    fd = nfq_fd(h);
+
+    // para el tema del loss:   while ((rv = recv(fd, buf, sizeof(buf), 0)) && rv >= 0)
+
+    while ((rv = recv(fd, buf, sizeof(buf), 0))) {
+        printf("pkt received\n");
+        nfq_handle_packet(h, buf, rv);
+    }
+
+    printf("unbinding from queue 0\n");
+    nfq_destroy_queue(qh);
+
+#ifdef INSANE
+    /* normally, applications SHOULD NOT issue this command, since
+     * it detaches other programs/sockets from AF_INET, too ! */
+    printf("unbinding from AF_INET\n");
+    nfq_unbind_pf(h, AF_INET);
+#endif
+
+    printf("closing library handle\n");
+    nfq_close(h);
+
+    exit(0);
+}
