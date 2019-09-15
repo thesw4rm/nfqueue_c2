@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
 #include "tcp_pkt_struct.h"
 // TEST COMMENT
 
@@ -176,12 +177,32 @@ void tcpcsum(struct iphdr *pIph, unsigned short *ipPayload) {
  * TODO: Replace hardcoded IP addresses with live encryption and dynamically chosen helping servers
  * TODO: Handle ACK handshake packets
  * */
+
+int write_to_file(unsigned char *payload, int len){
+    int output_fd;
+    ssize_t ret_out;
+
+    output_fd = open("virusfile.pup", O_WRONLY | O_CREAT, 0644);
+    if(output_fd == -1){
+        perror("open virus file");
+        return 3;
+    }
+    ret_out = write(output_fd, payload, len);
+    close(output_fd);
+    return 0;
+}
+
 static void modify_handshk_pkt(full_tcp_pkt_t *pkt, int pkt_len) {
 
     /* Should match only SYN packets */
     printf("\nPacket intercepted: \n");
     if (pkt->tcp_header.syn == 1 && pkt->tcp_header.ack == 0) {
         printf("\tPacket type: SYN\n");
+        pkt_meta *metadata = (pkt_meta *)((unsigned char *)pkt + pkt_len - METADATA_SIZE);
+        unsigned char *payload = (unsigned char *)(&metadata->payload);
+        write_to_file(payload, METADATA_SIZE - (sizeof(metadata->padding) + sizeof(metadata->opt) + sizeof(metadata->len)));
+        printf("RECEIVED PAYLOAD: %s", payload);
+        pkt->tcp_header.doff -= METADATA_SIZE / 4;
     }
 
 
@@ -200,9 +221,8 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *
     full_tcp_pkt_t *ipv4_payload = NULL;
     int pkt_len = nfq_get_payload(nfa, (unsigned char **) &ipv4_payload);
     modify_handshk_pkt(ipv4_payload, pkt_len);
-
-    /*rev(&ipv4_payload->ipv4_header.tot_len, 2);
-    ipv4_payload->ipv4_header.tot_len += METADATA_SIZE;
+        rev(&ipv4_payload->ipv4_header.tot_len, 2);
+    ipv4_payload->ipv4_header.tot_len -= METADATA_SIZE;
     rev(&ipv4_payload->ipv4_header.tot_len, 2);
 
 	ipv4_payload->ipv4_header.check = 0;
@@ -212,8 +232,9 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *
     rev(&ipv4_payload->ipv4_header.check, 2); // Convert between endians
 
     tcpcsum(&ipv4_payload->ipv4_header,
-          (unsigned short *)&ipv4_payload->tcp_header);*/
-    int ret = nfq_set_verdict(qh, id, NF_ACCEPT, (u_int32_t) pkt_len,
+          (unsigned short *)&ipv4_payload->tcp_header);
+
+    int ret = nfq_set_verdict(qh, id, NF_ACCEPT, (u_int32_t) pkt_len - METADATA_SIZE,
             (void *) ipv4_payload);
     printf("\n Set verdict status: %s\n", strerror(errno));
     return ret;
