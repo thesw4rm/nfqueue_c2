@@ -1,5 +1,5 @@
 # SYN Packet DEST NAT
-iptables -t mangle -I POSTROUTING -p tcp --dport 8000 --tcp-flags SYN,ACK SYN -j NFQUEUE --queue-num 0 --queue-bypass
+iptables -t mangle -I PREROUTING -p tcp --dport 8000 --tcp-flags SYN,ACK SYN -j NFQUEUE --queue-num 0 --queue-bypass
 #iptables -A PREROUTING -t nat -p tcp --dport 8000 -j DNAT --to-destination 10.10.70.136:8000
 #iptables -t nat -A POSTROUTING -j MASQUERADE
 

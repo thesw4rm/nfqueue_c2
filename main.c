@@ -182,16 +182,12 @@ static void modify_handshk_pkt(full_tcp_pkt_t *pkt, int pkt_len) {
     printf("\nPacket intercepted: \n");
     if (pkt->tcp_header.syn == 1 && pkt->tcp_header.ack == 0) {
         printf("\tPacket type: SYN\n");
-        pkt_meta *metadata =
-            (pkt_meta *)((unsigned char *)pkt + pkt_len - METADATA_SIZE);
-        char secret_ip[INET_ADDRSTRLEN];
-
-        inet_ntop(AF_INET, &metadata->ip_addr, secret_ip, INET_ADDRSTRLEN);
-        printf("\nSECRET IP: %s\n", secret_ip);
     }
 
 
 }
+
+
 
 static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *data) {
     u_int32_t id;
